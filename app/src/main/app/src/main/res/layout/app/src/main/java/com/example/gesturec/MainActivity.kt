@@ -3,6 +3,7 @@ package com.example.gesturec
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Button
@@ -14,7 +15,10 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
-import android.graphics.Bitmap
+import org.tensorflow.lite.Interpreter
+import java.io.FileInputStream
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -23,6 +27,8 @@ class MainActivity : AppCompatActivity() {
     private var cameraExecutor = Executors.newSingleThreadExecutor()
     private var processing = false
     private val siteUrl = "https://chatunity.it"
+
+    private lateinit var tflite: Interpreter
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
@@ -36,6 +42,9 @@ class MainActivity : AppCompatActivity() {
 
         previewView = findViewById(R.id.previewView)
         startButton = findViewById(R.id.startButton)
+
+        // Carica modello TFLite dalla cartella assets
+        tflite = Interpreter(loadModelFile("c_gesture.tflite"))
 
         startButton.setOnClickListener {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -65,7 +74,7 @@ class MainActivity : AppCompatActivity() {
                     val bitmap = imageProxy.toBitmap()
                     GlobalScope.launch(Dispatchers.Default) {
                         try {
-                            if (processFrameForCGesture(bitmap)) {
+                            if (detectCGesture(bitmap)) {
                                 withContext(Dispatchers.Main) {
                                     openSite()
                                 }
@@ -93,9 +102,42 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(siteUrl))
         startActivity(intent)
     }
+
+    private fun loadModelFile(modelName: String): MappedByteBuffer {
+        val fileDescriptor = assets.openFd(modelName)
+        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
+        val channel = inputStream.channel
+        val startOffset = fileDescriptor.startOffset
+        val declaredLength = fileDescriptor.declaredLength
+        return channel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+    }
+
+    private fun detectCGesture(bitmap: Bitmap): Boolean {
+        // Preprocess bitmap se necessario (ridimensiona, normalizza)
+        val input = preprocessBitmap(bitmap) // funzione che converte bitmap in input tensor
+        val output = Array(1) { FloatArray(1) }
+        tflite.run(input, output)
+        // Se la probabilità > 0.8 considera gesto rilevato
+        return output[0][0] > 0.8f
+    }
+
+    private fun preprocessBitmap(bitmap: Bitmap): Array<Array<Array<FloatArray>>> {
+        // Ridimensiona bitmap a 224x224, normalizza pixel a [0,1]
+        val resized = Bitmap.createScaledBitmap(bitmap, 224, 224, true)
+        val input = Array(1) { Array(224) { Array(224) { FloatArray(3) } } }
+        for (x in 0 until 224) {
+            for (y in 0 until 224) {
+                val px = resized.getPixel(x, y)
+                input[0][y][x][0] = ((px shr 16 and 0xFF) / 255.0f)
+                input[0][y][x][1] = ((px shr 8 and 0xFF) / 255.0f)
+                input[0][y][x][2] = ((px and 0xFF) / 255.0f)
+            }
+        }
+        return input
+    }
 }
 
-// --- helper extensions ---
+// --- helper extension ---
 fun ImageProxy.toBitmap(): Bitmap {
     val yBuffer = planes[0].buffer
     val uBuffer = planes[1].buffer
@@ -114,11 +156,4 @@ fun ImageProxy.toBitmap(): Bitmap {
     yuvImage.compressToJpeg(android.graphics.Rect(0, 0, width, height), 90, out)
     val imageBytes = out.toByteArray()
     return android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-}
-
-suspend fun processFrameForCGesture(bitmap: Bitmap): Boolean {
-    // TODO: integrare modello TFLite per rilevare la C
-    // Per ora ritorna false, ma puoi aggiungere il modello TFLite nella cartella assets e fare l'inference
-    delay(10)
-    return false
 }
